@@ -13,7 +13,7 @@ Se presentan a continuación los diferentes archivos.
 2. **sentimiento.ipynb**: script en google colab con pysentimiento.
 3. base_final.Rdata: Base resultante luego de todos los cambios generados en el preprocesamiento.
 4. casarosada_anotada.Rdata: Base generada por Udpipe.
-5.casarosada_final.Rdata: Base resultante antes de procesarlo con pysentimiento
+5. casarosada_final.Rdata: Base resultante antes de procesarlo con pysentimiento
 6. casarosada_final_sentiment.csv: Base resultante luego de procesarlo con pysentimiento
 7. casarosada_raw: Base inicial del scraping web
 
