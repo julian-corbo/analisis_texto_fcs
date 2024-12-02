@@ -1,6 +1,6 @@
 Trabajo final realizado en el marco del curso "Recuperación y Análisis de Texto con R" dictado en la Facultad de Ciencias Sociales (Udelar). 
 
-Mpropongo realizar un análisis exploratorio de los discursos presidenciales argentinos desde la asunción de Mauricio Macri en 2015 hasta la actualidad. Dado el contexto técnico del curso no pretendo realizar un análisis interpretativo de corte teórico y me limitaré a una exploración de diferentes formas en que se puede explorar la temática y algunos comentarios descriptivos de estos.
+Me propongo realizar un análisis exploratorio de los discursos presidenciales argentinos desde la asunción de Mauricio Macri en 2015 hasta la actualidad. Dado el contexto técnico del curso no pretendo realizar un análisis interpretativo de corte teórico y me limitaré a una exploración de diferentes formas en que se puede explorar la temática y algunos comentarios descriptivos de estos.
 
 El informe se estructurará siguiendo los requerimientos de la consigna, donde se explicará el proceso y las descripciones que se tomaron en el código. A su vez, la sección de análisis será estructurada en base a diferentes preguntas que irán surgiendo.
 
