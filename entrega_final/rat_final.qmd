@@ -1,0 +1,842 @@
+---
+title: "Entrega Final"
+author: "Julián Corbo S."
+date: "`r Sys.Date()`"
+execute: 
+  echo: false
+  warning: false
+format: 
+   pdf:
+    documentclass: article
+    toc: True
+    keep_tex: true
+    fig-align: "center"
+    geometry: "margin=1in"
+   
+editor: visual
+---
+
+```{r setup, include=FALSE}
+
+library(quanteda)
+library(tidyverse)
+library(udpipe)
+library(stopwords)
+library(scales)
+library(tidytext)
+library(ggraph)
+library(igraph)
+library(gt)
+library(knitr)
+library(kableExtra)
+```
+
+\pagebreak
+
+# Consigna
+
+**Recuperación:** *Elegir una fuente de datos de las vistas en el curso (archivos de texto brutos, OCR, web scraping, scrapeo parlamentario, prensa digital, búsquedas de google, transcripción de audio, subtítulos de YouTube, APIs de Google, entre otras) e incluir el proceso de extracción o reconstrucción de la información.*
+
+**Pre-procesamiento**: *Crear un corpus de datos textuales tabulados, realizar el pre-procesamiento utilizando alguna/s de las herramientas vistas en el curso (manipulación de strings, limpieza o pre/codificación manual)*
+
+**Análisis**: *Incluir al menos tres técnicas de minería de texto vistas en el curso (frecuencia de ocurrencia, asociación de palabras, contexto de aparición de palabras o frases, diccionarios, análisis de sentimiento, modelado de temas, entre otros posibles)*
+
+**Visualización**: *Ilustrar el documento con al menos dos visualizaciones que surjan del procesamiento del texto precedente y den cuenta de los resultados del mismo.*
+
+# Archivos Entregados
+
+En esta entrega utilicé múltiples recursos que requieren tiempo de procesamiento, por lo que trabajé en etapas agregando cambios sobre distintas bases. Adjunto todas estas con motivo de documentar el proceso pero solo son necesarias para el funcionamiento del script aquellas que están marcadas en negrita.
+
+1.  **base_final.Rdata**: Base resultante luego de todos los cambios generados en el preprocesamiento.
+2.  **casarosada_anotada.Rdata**: Base generada por Udpipe.
+3.  casarosada_final.Rdata: Base resultante antes de procesarlo con pysentimiento
+4.  casarosada_final_sentiment.csv: Base resultante luego de procesarlo con pysentimiento
+5.  casarosada_raw: Base inicial del scraping web
+6.  sentimiento.ipynb: script en google colab con pysentimiento.
+
+\pagebreak
+
+# Introducción
+
+En el presente trabajo me propongo realizar un análisis exploratorio de los discursos presidenciales argentinos desde la asunción de Mauricio Macri en 2015 hasta la actualidad. Dado el contexto técnico del curso no pretendo realizar un análisis interpretativo de corte teórico y me limitaré a una exploración de diferentes formas en que se puede explorar la temática y algunos comentarios descriptivos de estos.
+
+El informe se estructurará siguiendo los requerimientos de la consigna, donde se explicará el proceso y las descripciones que se tomaron en el código. A su vez, la sección de análisis será estructurada en base a diferentes preguntas que irán surgiendo.
+
+En términos generales se pretende responder cómo ha ido evolucionando la retórica presidencial argentina en los últimos tres periodos. Dado que la naturaleza discursiva de Javier Milei resulta particularmente llamativa se ahondara en la misma.
+
+# Recuperación
+
+Por simplicidad del análisis opté por reducir el universo discursivo de los presidentes a los discursos publicados en la página oficial de la Casa Rosada. Debe tenerse en cuenta que esto implica un gran recorte de los elementos discursivos que hacen a la política contemporánea, pero permite observarlo en su forma más institucionalizada.
+
+La técnica utilizada para la obtención de los datos textuales fue el **scraping** o raspado web. Para esto creé una función que extrae la transcripción (utilizando el paquete *rvest*) del respectivo discurso de un link asignado como argumento. La dificultad consiste en repetir este proceso para los 1390 discursos publicados.
+
+Afortunadamente el comportamiento del url que alberga los discursos era bastante simple: al enlace base de la página ([https://www.casarosada.gob.ar/informacion/discursos?start=](https://www.casarosada.gob.ar/informacion/discursos?start=0)) se le agregaba una secuencia de múltiplos de 40. Pero implicaba el desafío adicional de extraer cada uno de los hipervínculos que llevaban a los discursos propiamente dichos en cada una de esas páginas.
+
+Lo solucioné realizando una iteración relativamente simple que permita obtener cada uno de estos hipervínculos y extraer el texto con la función que había creado previamente. Además, extraje en este proceso la fecha, título y el presidente y lo guarde en una base de datos llamada *casarosada.*
+
+```{r scraping, eval=FALSE, include=FALSE}
+
+text_scrap <- function(link){
+  
+  text_link <- read_html(link)
+  
+  text <- text_link %>% 
+    html_nodes("p+ p") %>% 
+    html_text() %>% 
+    str_flatten(collapse = "\n")
+    
+  return(text)
+}
+
+```
+
+```{r scraping_loop, eval=FALSE, include=FALSE}
+
+library(rvest)
+casarosada <- tibble()
+presidentes <- c("Milei", "Fernandez", "Macri")
+presidentes_match <- str_c(presidentes, collapse = "|")
+
+for (webpage in seq(0, 1360, 40)){ 
+  
+  link <- paste0("https://www.casarosada.gob.ar/informacion/discursos?start=", webpage)
+  
+  page <- read_html(link)
+  
+  titulo <- page %>% 
+    html_nodes(".category-item-title h3") %>%  
+    html_text() %>% 
+    str_to_title() %>% 
+    stringi::stri_trans_general(id = "Latin-ASCII")
+  
+  presidente <- str_extract(titulo, presidentes_match)
+
+  fecha <- page %>% # (no logre tranformarlo a datetime).
+    html_nodes("time") %>% 
+    html_text2() %>% 
+    str_remove_all("\\r") %>% 
+    str_squish() 
+  
+  hipervinculos <- page %>%
+    html_nodes("a.panel") %>%
+    html_attr("href") %>% 
+    paste0("https://www.casarosada.gob.ar", .) 
+  
+
+  discurso <- purrr::map_chr(.x = hipervinculos, .f = text_scrap) 
+
+  casarosada <- bind_rows(casarosada, tibble(titulo, presidente, fecha, discurso))
+
+
+  print(paste("Progreso: ", webpage, "de 1360"))
+
+} 
+
+# save(casarosada, file = "casarosada_raw.Rdata")
+```
+
+```{r raw}
+
+load("C:/Users/Julian/Desktop/JULIAN/R/FCS/RAT2024/entrega_final/casarosada_raw.Rdata")
+
+head(casarosada)
+ 
+
+
+```
+
+# Pre-procesamiento
+
+Una vez obtenida la base fue necesario realizar un pre procesamiento para obtener un corpus de texto con el que se pueda trabajar.
+
+Primero me interesaba realizar algunos cambios generales a *casarosada* de forma que permitiese un mejor uso de la información disponible: asigné un ID de discurso, cambié el formato de fecha a datetime y completé las celdas *"missing"* de la columna *presidente* con el valor inmediatamente anterior.
+
+Luego, me concentré en las transformaciones necesarias de los datos textuales. Transformé todos los caracteres en minúscula, eliminé caracteres especiales del español, eliminé toda la puntuación y separé el corpus por párrafo (agregándole un ID de párrafo correspondiente).
+
+Cabe destacar que en algunos discursos aparecen otros interlocutores que deberían ser eliminados para el correcto procesamiento del corpus. Sin embargo, dada la dificultad que me suponía y los objetivos de la entrega decidí dejar intactas y asumir despreciables estas intervenciones.
+
+```{r, eval=FALSE}
+
+# load("C:/Users/Julian/Desktop/JULIAN/R/FCS/RAT2024/entrega_final/casarosada_raw.Rdata")
+
+# Cambios generales 
+
+casarosada <- casarosada %>% 
+  mutate(
+    dis_id = 1:n(),                         # id del discurso 
+    fecha = dmy(fecha, locale = "es_ES"),   # fecha
+    ) %>% 
+  fill(presidente, .direction = "down") %>% # Completo las celdas missing de presidente  con el valor anterior 
+  relocate(dis_id, .before = titulo)        
+  
+  
+
+# Pre - Procesamiento de la celda discurso  
+casarosada <- casarosada %>% 
+  mutate(discurso = str_to_lower(discurso),                                                        # Paso a minúscula
+         discurso = stringi::stri_trans_general(discurso, id = "Latin-ASCII"),                     # Quito caracteres especiales espaniol
+         discurso = str_replace_all(discurso, pattern = '[[:punct:] ]+', replacement = " ")) %>%   # quito puntuacion
+  separate_rows(discurso, sep = "\n") %>%                                                          # Separo por párrafos 
+  filter(discurso != "") %>%                                                                       # Elimino filas vacías (doble linebreak)
+  mutate(par_id = 1:n()) %>%                                                                       # id por párrafo
+  relocate(par_id, .before = dis_id)                                                               
+  
+# save(casarosada, file = "entrega_final/casarosada_final.Rdata")
+
+
+
+```
+
+# Análisis
+
+## Análisis de sentimiento
+
+Mi primer interrogante consistía en el tono del discurso. Milei, desde sus comienzos como figura pública, ha sido caracterizado por un tono particularmente disruptivo y negativo. Me interesaba saber si esto se traducía a su comunicación institucional y cómo se comparaba con los predecesores al cargo presidencial.
+
+Para esto utilicé un toolkit de procesamiento de lenguaje natural de Python llamado *pysentimiento* que tiene buenos resultados con el español. La razón por la que previamente separé el corpús en párrafos es que este modelo fue entrenado a base de tweets, por lo que el reconocimiento de tonos en textos largos implicaba un resultado bastante cuestionable en términos de validez metodológica.
+
+Para obtener un sentimiento en el discurso completo le asigné un puntaje de acuerdo al tono por párrafo y sumé cada uno de ellos. De esta forma se obtiene un resultado negativo si el discurso completo fue mayoritariamente negativo y viceversa para el tono positivo.
+
+```{r, eval=FALSE}
+
+casarosada <- rio::import("entrega_final/casarosada_final_sentiment.csv") %>%
+  select(-text_proc) %>% 
+  filter(discurso != "") %>% 
+  separate(fecha, c("anio", "mes", "dia"), sep = "-", remove = FALSE)
+
+# Recodifico para poder ver como se comporta a lo largo del tiempo. Grafico 2 
+casarosada <- casarosada %>% 
+  mutate(sent_rec = case_when(sentimiento == "POS" ~  1, 
+                              sentimiento == "NEG" ~ -1,
+                              sentimiento == "NEU" ~  0)
+         ) %>% 
+  group_by(dis_id) %>% 
+  mutate(tono_dis = sum(sent_rec)) %>% 
+  ungroup()
+
+
+
+```
+
+```{r load_base}
+load("C:/Users/Julian/Desktop/JULIAN/R/FCS/RAT2024/entrega_final/base_final.Rdata")
+
+
+casarosada <- casarosada %>% 
+  mutate(presidente = fct(presidente, levels = c("Macri", "Fernandez", "Milei")))
+
+```
+
+Desde el punto de vista del tono o sentimiento (Fig. 1) se pueden observar tres formas discursivas bien diferenciadas. En el caso de Fernández, aunque tiene una proporción positiva predominante, hay cierto equilibrio con 26,6%, 30,6% y 42,7% de tono negativo, neutro y positivo, respectivamente. En el caso de Macri, resulta especialmente interesante que más de la mitad de su discurso en todo el mandato fue en una tonalidad positiva y solo un 14.5% puede caracterizarse como negativo. Por último, Milei presenta el caso opuesto al anterior. Aproximadamente la mitad (54.9%) de su discurso hasta la fecha presenta una tonalidad negativa. Le sigue un contenido neutral con una proporcion porcentual del 30.5% y por ultimo un 14.5% del discurso puede considerarse negativo.
+
+Antes de proseguir han de hacerse dos puntualizaciones. Primero se debe tener en cuenta que el sentimiento negativo no se traduce linealmente a agresividad. Por ejemplo, el gobierno de Fernández fue atravesado por una pandemia, por lo que tiene sentido imaginarse altos grados de elementos negativos que comuniquen, por ejemplo, tristeza o lamento hacia la situación. *Pysentimiento* tiene una funcionalidad que permite reconocer *Hate Speech* que podría resultar útil para hacer algunas observaciones mas detalladas al respecto, sin embargo por cuestiones de tiempo de procesamiento no continué por ese camino. Segundo, cabe recordar que Javier Milei no ha terminado su mandato por lo que apenas se está evaluando un año del cargo.
+
+```{r FIG1, fig.align='center', out.width= "100%"}
+# por presidente (mejorar)
+
+
+casarosada %>%
+  mutate(sentimiento = recode(sentimiento,
+                             NEG = "Negativo",
+                             POS = "Positivo",
+                             NEU = "Neutral")) %>% 
+  group_by(presidente, sentimiento) %>% 
+  summarise(n = n(), .groups = "drop_last") %>% 
+  mutate(prop = n/sum(n)) %>% 
+  ggplot() + 
+  geom_col(aes(x = presidente, y = prop, fill = sentimiento),
+           position = position_dodge2(width = 0.9)) +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(values = c("red4","#FFFAA4","darkgreen")) +
+  geom_text(
+    aes(x = presidente,
+        y = prop,
+        label = paste0(round(prop*100, digits = 1),"%")),
+    position = position_dodge2(width = 0.9), 
+    vjust= - 0.3, 
+    fontface = "bold", 
+    size = 2
+    ) +
+  labs(
+    title = "FIG. 1: Proporción de sentimiento en los discursos de Macri, Fernández y Milei (%)",
+    subtitle = element_blank(),
+    caption = element_blank(),
+    x = NULL, y = NULL, fill = "Sentimiento"
+    ) +
+  theme(
+    text = element_text(family = "serif"),
+    plot.title = element_text(face = "bold", size = 12),
+    plot.subtitle = element_text(size = 10, color = "gray40"),
+    legend.title = element_text(size = 10, face = "bold"),
+    # plot.caption = element_text(size = 10, hjust = 1, color = "gray60"),
+    panel.background = element_rect(fill = "white", color = NA),
+    panel.grid.major.y = element_line(color = "lightgray", size = 0.3),
+    panel.grid.major.x = element_blank(),
+    axis.text.x = element_text(face = "bold"),
+    plot.background = element_rect(colour = "black", fill=NA, size = .5),
+    legend.position = "bottom",
+    legend.background = element_rect(colour = "gray", fill=NA, size = .2)
+  )
+
+```
+
+También es posible evaluar la evolución del sentimiento en el tiempo (Fig. 2). En este punto, son llamatorios los picos de positividad que tiene Macri a comienzos del 2016, 2017 y 2018. En la Tabla 1 se muestran los títulos correspondientes a esos tres momentos. De forma simétrica se pueden ver en la Tabla 2 los discursos con tonalidades más negativas que ha presentado Milei. Resulta llamativo que en solo un año de mandato haya alcanzado niveles tan bajos en varias ocasiones.
+
+```{r FIG2, fig.align='center', out.width="100%"}
+
+#FIG2
+casarosada %>%
+  group_by(presidente) %>% 
+  ggplot(aes(x = fecha, y = tono_dis)) + 
+  geom_line(aes( color = presidente)) +
+  # geom_smooth(color = "black") +
+  # scale_color_manual(values = c("orange","pink","lightblue")) +
+  labs(title = "FIG.2: Sentimiento en los discursos de Macri, Fernández y Milei a lo largo del tiempo",
+       x = element_blank(),
+       y = element_blank(),
+       color = "Presidente") +
+  geom_hline(yintercept = 0, alpha = 0.3, linetype='dashed') +
+  scale_color_manual(values = c("#f2e76b","#2596be","#6c25be")) +
+  labs(
+    title = "FIG. 2: Tono Discursivo de Milei, Macri y Fernández en el tiempo",
+    subtitle = element_blank(),
+    caption = element_blank(),
+    x = NULL, y = NULL, fill = "Sentimiento"
+    ) +
+  theme(
+    text = element_text(family = "serif"),
+    plot.title = element_text(face = "bold", size = 12),
+    plot.subtitle = element_text(size = 10, color = "gray40"),
+    legend.title = element_text(size = 10, face = "bold"),
+    # plot.caption = element_text(size = 10, hjust = 1, color = "gray60"),
+    panel.background = element_rect(fill = "white", color = NA),
+    panel.grid.major.y = element_line(color = "lightgray", size = 0.3),
+    panel.grid.major.x = element_blank(),
+    axis.text.x = element_text(face = "bold"),
+    plot.background = element_rect(colour = "black", fill=NA, size = .5),
+    legend.position = "bottom",
+    legend.background = element_rect(colour = "gray", fill=NA, size = .2)
+  )
+
+```
+
+```{r Tabla1}
+
+# Tabla 1
+casarosada %>% 
+  filter(presidente == "Macri", tono_dis > 30) %>% 
+  distinct(titulo, .keep_all = TRUE) %>% 
+  select(titulo, fecha) %>%   
+  kable("latex", booktabs = TRUE, align = "c", caption = "Discursos de Macri con mayor positividad.") %>%
+  kable_styling(latex_options = c("striped", "hold_position", "scale_down"), 
+                full_width = FALSE,
+                position = "center",     
+                font_size = 10)
+
+
+```
+
+```{r Tabla2}
+
+#Tabla 2
+casarosada %>% 
+  filter(presidente == "Milei") %>% 
+  filter(tono_dis < -30) %>%
+  distinct(titulo, .keep_all = TRUE) %>% 
+  select(titulo, fecha) %>%     # Selecciona solo las columnas necesarias
+  kable("latex", booktabs = TRUE, align = "c", caption = "Discursos de Milei con mayor negatividad.") %>%
+  kable_styling(latex_options = c("striped", "hold_position", "scale_down"), 
+                full_width = FALSE,       
+                position = "center",     
+                font_size = 10)
+
+```
+
+## Frecuencia de Ocurrencia
+
+La segunda interrogante que me surgió fue qué palabras se repetían en el discurso. Además me pareció importante agregar capacidad de análisis logrando identificar qué categoría gramatical corresponde a cada palabra del corpus. Para esta tarea utilicé *Udpipe*[^1].
+
+[^1]: Para esto utilice de referencia el procesamiento en: <https://www.elinagomez.com/blog/2023-05-4-palabras-presidente/>
+
+Utilizando el paquete *Tidytext* tokenizé la base *casarosada* y realicé una intersección con la base resultante de *Udpipe* para obtener las categorías de las palabras en una sola base. De esta forma puedo observar fácilmente frecuencia de ocurrencia manteniendo otras variables que puedo incorporar al procesamiento.
+
+Considero que que no tiene mucho valor analítico utilizar frecuencias absolutas, por lo que utilicé el estadístico TF_IDF que permite medir el peso de las palabras dentro de un corpus de texto. Se muestran dos visualizaciones. Uno muestra las palabras con mayor peso cuando se lo compara entre los presidentes (FIG. 3). Con esto pretendo una exploración rápida de algunas temáticas que caracterizaron cada uno de los mandatos.
+
+```{r udpipe, eval=FALSE}
+
+modelo_sp <- udpipe::udpipe_download_model('spanish')        # descarga el modelo y guarda la referencia  
+
+modelo_sp <- udpipe_load_model(file = modelo_sp$file_model)  # cargamos el modelo en memoria
+
+
+casarosada_anotada <- udpipe_annotate( 
+  object = modelo_sp,                                        # el modelo de idioma
+  x = casarosada$discurso,                                   # el texto a anotar, 
+  doc_id = casarosada$dis_id,                                
+  trace = 20
+  ) %>% as_tibble(.) 
+
+# save(casarosada_anotada, file = "entrega_final/casarosada_anotada.Rdata")
+
+
+```
+
+```{r join_upos}
+
+load("C:/Users/Julian/Desktop/JULIAN/R/FCS/RAT2024/entrega_final/casarosada_anotada.Rdata")
+
+# Dejo solo casos unicos para hacer un join one to many 
+casarosada_unique <- casarosada_anotada %>%      
+  distinct(token, .keep_all = TRUE)
+
+# Intersecto los resultados de Udpipe con la base tokenizada
+casarosada_token <- casarosada %>% 
+  unnest_tokens(word, discurso, drop = FALSE) %>% 
+  left_join(                                           
+    casarosada_unique %>% select(token, lemma, upos),
+    by = c( "word" = "token")
+    ) %>% 
+  filter(!word %in% str_to_lower(stringi::stri_trans_general(stopwords::stopwords(language = "es"),id = "Latin-ASCII"))) %>%
+  filter(!is.na(upos)) #hay palabras que udpipe no logro identificar. 
+
+
+
+
+ 
+
+```
+
+Lógicamente las palabras con mayor ocurrencia de Fernández son aquellas que tienen que ver con el contexto de emergencia sanitaria. También es destacable la presencia de figuras como Wado (de Pedro), sin embargo es esperable que al comparar entre presidentes adquieran relevancia algunas personas específicas a cada uno de los períodos presidenciales . Por otro lado, Macri demuestra, sin una contextualización previa y sin intenciones de ahondar demasiado, en su uso de palabras una retórica que me atrevería a considerar estándar (Diálogo, mercosur, regional, climático).
+
+El caso de Milei, como era de esperarse, difiere ampliamente de los dos casos anteriores. En este sentido, es notorio el componente económico de su discurso[^2]. La presencia de "socialismo", "neoclásico", "liberal" y "keynes" resulta bastante ilustrativo de este punto. Además, como en el caso de Fernández, aparecen menciones a varios integrantes de su gobierno (Pettovelo, Caputo, Bausilli).
+
+[^2]: De hecho, en su momento intenté hacer un topic modeling pero tuve que descartarlo porque no lograba reconocer diferentes temáticas. En su momento pensé que era un problema de la base, sin embargo, me atrevería a decir que no tiene diversidad de temas. Tal vez, a medida que avance en su presidencia diversifica su discurso.
+
+```{r FIG3, fig.align='center', out.width="100%", fig.height=6}
+# Fig 3
+
+
+stoppresi <- c("put", "compan*", "supongamos", "cuasi", "digamos", "bue", "cosa", "pr", "aplausos")
+casarosada_token <- casarosada_token %>% 
+  filter(!lemma %in% stoppresi)
+
+#FIG 3
+casarosada_token %>% 
+  filter(upos %in% c("NOUN", "VERB", "ADJ", "PROPN", "ADV")) %>% 
+  count(presidente, lemma, sort = TRUE) %>% 
+  bind_tf_idf(lemma, presidente, n) %>% 
+  group_by(presidente) %>% 
+  slice_max(tf_idf, n = 10) %>% 
+  ungroup() %>% 
+  mutate(presidente = as.factor(presidente),
+           lemma = reorder_within(lemma, by =tf_idf, within = presidente)) %>%
+  ggplot(aes(x = lemma, y = tf_idf,  fill = presidente)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~presidente, scales = "free_y", ncol = 1, strip.position = "right") +
+  coord_flip() +
+  scale_x_reordered() +
+  scale_fill_manual(values = c("#f2e76b","#2596be","#6c25be")) +
+  labs(
+    title = "Fig. 3: Comparación de Palabras Relevantes entre Discursos Presidenciales",
+    subtitle = "Palabras con mayor peso (TF IDF) entre los discursos de Macri, Fernández y Milei",
+    caption = "" ,
+    x = NULL, y = NULL, fill = "Presidente"
+  ) +
+  theme(
+    text = element_text(family = "serif"),
+    plot.title = element_text(face = "bold", size = 9, hjust = 0),
+    plot.subtitle = element_text(size = 9, color = "gray40", hjust = 0),
+    panel.background = element_rect(fill = "white", color = NA),
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(size = 4),
+    axis.ticks.x = element_blank(),
+    strip.background = element_blank(),
+    strip.text = element_text(size = 12, face = "bold"),
+    plot.background = element_rect(colour = "black", fill=NA, size = .5)
+  )
+
+```
+
+La segunda visualización (FIG. 4) ilustra el peso de las palabras en los discursos de cada uno de los presidentes. Para este punto también decidí reducir la base a sustantivos, adjetivos y nombres propios. No parecería haber nuevas observaciones relevantes mas allá de una expansión temática de lo mencionado anteriormente. Para el caso de Fernández resulta curioso que "tecnópolis" tenga más peso que otros conceptos que refieren a la situación pandémica.
+
+En la retórica de Milei el peso que tienen los conceptos de corte económico parecen perder relevancia y aparecen menciones a personas como Bukele y Petri y símbolos nacionales como la bandera y Belgrano.
+
+```{r FIG4, fig.align='center', out.width="100%", fig.height=6}
+## Por dis de cada presidente Este deberia ir primero
+casarosada_token %>%
+  filter(upos %in% c("NOUN", "ADJ", "PROPN")) %>%
+  group_by(presidente) %>%
+  nest() %>%
+  mutate(tf_idf_data = map(data, ~ .x %>%
+                             count(dis_id, word, sort = TRUE) %>%
+                             bind_tf_idf(word, dis_id, n) %>%
+                             slice_max(tf_idf, n = 15))) %>%
+  unnest(tf_idf_data) %>%
+  ungroup() %>%
+  mutate(presidente = as.factor(presidente),
+           word = reorder_within(word, by =tf_idf, within = presidente)) %>%
+  ggplot(aes(x = word, y = tf_idf,  fill = presidente)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~presidente, scales = "free", ncol = 1, strip.position = "right") +
+  coord_flip() +
+  scale_x_reordered() +
+  scale_fill_manual(values = c("#f2e76b","#2596be","#6c25be")) +
+  labs(
+    title = "Fig. 4: Palabras Destacadas en Discursos Presidenciales",
+    subtitle = "Palabras con mayor peso (TF IDF) en los discursos de Macri, Fernández y Milei",
+    caption = "" ,
+    x = NULL, y = NULL, fill = "Presidente"
+  ) +
+  theme(
+    text = element_text(family = "serif"),
+    plot.title = element_text(face = "bold", size = 10, hjust = 0),
+    plot.subtitle = element_text(size = 10, color = "gray40", hjust = 0),
+    panel.background = element_rect(fill = "white", color = NA),
+    legend.title = element_text(size = 10, face = "bold"),
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(size = 4),
+    axis.ticks.x = element_blank(),
+    strip.background = element_blank(),
+    strip.text = element_text(size = 12, face = "bold"),
+    plot.background = element_rect(colour = "black", fill=NA, size = .5)
+  )
+
+```
+
+## Milei
+
+### Términos Claves
+
+A continuación quise ahondar en el caso de Milei y, específicamente, en el componente que identifiqué como negativo en su discurso. Me propuse ahondar aún más que en palabras individuales, por lo que decidí usar la función *keywords_rake* de *udpipe* que utiliza un *"algoritmo de extracción de palabras clave que intenta determinar frases relevantes en un cuerpo de texto mediante el análisis de la frecuencia de aparición de las palabras y su coocurrencia con otras palabras en el texto"* [^3].
+
+[^3]: <https://pypi.org/project/rake-nltk/>
+
+```{r FIG5, out.width="100%", fig.align='center', fig.height=5}
+# FIG 5
+
+casarosada_token %>%
+  filter(presidente == "Milei" &
+         sentimiento == "NEG") %>% 
+  udpipe::keywords_rake(term = "word",
+                        group = "dis_id",
+                        relevant = casarosada_token %>% 
+                          filter(presidente == "Milei" & sentimiento == "NEG") %>%  
+                          pull(upos) %in% c("NOUN", "ADJ","PROPN"),
+                        ngram_max = 3) %>% 
+  filter(freq >5)%>%
+  arrange(rake) %>%
+  top_n(20, abs(rake)) %>%
+  ggplot(aes(rake, reorder(keyword, rake) )) +
+  geom_col(show.legend = FALSE, fill= "#6c25be") + #uso geom_col para no usar stat = identity :)
+  labs(
+    title = "Fig. 5: Términos Clave en la Tonalidad Negativa de Milei (RAKE)",
+    subtitle = "",
+    caption = element_blank(),
+    x = NULL, y = NULL, fill = "Presidente"
+  ) +
+  theme(
+    text = element_text(family = "serif"),
+    plot.title = element_text(face = "bold", size = 12, hjust = 0),
+    panel.background = element_rect(fill = "white", color = NA),
+    panel.border = element_blank(),
+    legend.title = element_text(size = 10, face = "bold"),
+    plot.subtitle = element_text(size = 10, color = "gray40", hjust = 0),
+    plot.caption = element_text(size = 6, face = "bold", hjust = 0),
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(size = 4),
+    axis.ticks.x = element_blank(),
+    strip.background = element_blank(),
+    strip.text = element_text(size = 12, face = "bold"),
+    plot.background = element_rect(colour = "black", fill=NA, size = .5)
+  )
+  
+
+```
+
+Nuevamente, aparece en la Figura 5 una centralidad en la economía , pero nos permite obtener un poco más de contexto. En este línea, aparece una relevancia importante en el banco central, el gasto y la propiedad. Además hay una reiterada referencia a la temporalidad: "historia argentina", "primer trimestre" y "primer mes de gestión".
+
+```{r bigrama}
+
+
+bigramas <- casarosada %>%
+  filter(presidente == "Milei") %>% 
+  unnest_tokens(word, discurso, token = "ngrams", n = 2) %>% 
+  filter(!is.na(word)) %>% 
+  separate(word, c("word1", "word2"), sep = " ") %>%
+  filter(
+    !word1 %in% stringi::stri_trans_general(stopwords::stopwords(language = "es"),id = "Latin-ASCII"),
+    !word2 %in% stringi::stri_trans_general(stopwords::stopwords(language = "es"),id = "Latin-ASCII"),
+    ) %>% 
+  unite(word, c("word1", "word2"), sep = " ") %>% 
+  count(word, sort = TRUE) %>%
+  pull(word)
+
+
+#trigramas <- casarosada %>%
+#  filter(presidente == "Milei") %>% 
+#  unnest_tokens(word, discurso, token = "ngrams", n = 3) %>% 
+#  filter(!is.na(word)) %>% 
+#  separate(word, c("word1", "word2", "word3"), sep = " ") %>%
+#  filter(
+#    !word1 %in% stringi::stri_trans_general(stopwords::stopwords(language = "es"),id = "Latin-ASCII"),
+#    !word2 %in% stringi::stri_trans_general(stopwords::stopwords(language = "es"),id = "Latin-ASCII"),
+#    !word3 %in% stringi::stri_trans_general(stopwords::stopwords(language = "es"),id = "Latin-ASCII"),) %>% 
+#  unite(word, c("word1", "word2", "word3"), sep = " ") %>% 
+#  count(word, sort = TRUE) %>%
+#  # filter(n > 5) %>% 
+#  pull(word)
+
+milei_ngram <- bind_rows(
+casarosada %>%
+  filter(presidente == "Milei") %>%
+  unnest_tokens(word, discurso) %>%
+  group_by(dis_id) %>%
+  mutate(
+    next_word = lead(word),
+    prev_word = lag(word)
+  ) %>%
+  filter(
+    !paste(word, next_word) %in% bigramas,  # Excluye si el token actual y siguiente forman un bigrama
+    !paste(prev_word, word) %in% bigramas   # Excluye si el token anterior y actual forman un bigrama
+  ) %>%
+  select(-next_word, -prev_word) %>%
+  ungroup(),
+  casarosada %>% 
+    filter(presidente == "Milei") %>%
+    unnest_tokens(word, discurso,
+                  token = "ngrams", n = 2) %>% 
+    filter(word %in% bigramas)
+  ) %>% 
+  left_join(
+    casarosada_unique %>% select(token, lemma, upos),
+    by = c( "word" = "token")
+    ) %>% 
+  filter(!word %in% stringi::stri_trans_general(stopwords::stopwords(language = "es"),id = "Latin-ASCII"))  
+
+
+```
+
+### Co-ocurrencia
+
+Llegando al final de mi práctica quise explorar en las posibilidades de análisis de la co-ocurrencia. Esto resultó un desafío porque quería mantener bigramas para mejorar las posibilidades de análisis: en los primeros intentos me generaba una correlacion de casi 1.0 entre banco y central, por lo que me propuse agregar algunos de estos conceptos como tokens. Esto derivó en un segundo problema: ahora el token "banco central" tenía una correlación de 1.0 con "banco". Luego de varios intentos logré generar una base tokenizada que tome en cuenta estos factores. Ahora la co-ocurrencia más alta de "banco central" es "inflación" con una correlacion de 0.817.
+
+Podemos hacer lo mismo por ejemplo para "gobierno anterior" como se ve en la Tabla 3.
+
+```{r Tabla3}
+#Tabla3
+
+# Para Viewr
+
+# milei_ngram %>%
+#   filter(sentimiento == "NEG") %>%
+#   filter(upos %in% c("NOUN",NA)) %>%
+#   filter(!str_detect(word, "\\d")) %>%
+#   count(dis_id, word, sort = TRUE) %>%
+#   cast_dfm(document = dis_id, term = word, value = n) %>%
+#   dfm_remove(min_nchar = 3) %>%
+#   quanteda.textstats::textstat_simil(selection = "gobierno anterior", 
+#                                      method = "correlation",
+#                                      margin = "features") %>% 
+#   as_tibble() %>% 
+#   arrange(-correlation) %>% 
+#   head(10) %>% 
+#   gt() %>%
+#   tab_header(title = "Co ocurrencia con la palabra 'gobierno anterior'") %>%
+#   tab_options(
+#     table.font.size = "small",
+#     heading.align = "center"
+#   )
+
+milei_ngram %>%
+  filter(sentimiento == "NEG") %>%
+  filter(upos %in% c("NOUN",NA)) %>%
+  filter(!str_detect(word, "\\d")) %>%    # ELimino Numeros 
+  count(dis_id, word, sort = TRUE) %>%
+  cast_dfm(document = dis_id, term = word, value = n) %>%
+  dfm_remove(min_nchar = 3) %>%
+  quanteda.textstats::textstat_simil(selection = "gobierno anterior", 
+                                     method = "correlation",
+                                     margin = "features") %>% 
+  as_tibble() %>% 
+  arrange(-correlation) %>% 
+  head(10) %>% 
+ kable("latex",
+       booktabs = TRUE,
+       caption = 'Co-ocurrencia con el Término "Gobierno Anterior"') %>%
+  kable_styling(latex_options = c("striped", "hold_position", "scale_down"), 
+                full_width = FALSE,            
+                position = "center",     
+                font_size = 9)
+```
+
+Es claro que existe en el discurso de Milei una fuerte asociación entre "gobierno anterior" y la situación económica. También aparece banco central y, curiosamente, periodistas ensobrados con una correlación considerable.
+
+### Key Word in Context
+
+Por último, me pareció importante expandir brevemente en el contenido propiamente dicho a través de la técnica denominada *Keyword in context (KWIC)* que permite observar un fragmento de texto del corpus que contiene algún concepto de interés en el que se quiera ahondar de forma agregada. Seleccioné dos conceptos: "periodistas ensobrados" (Tabla 4) que se obtuvo en la sección anterior y "casta política" (Tabla 5) , que se ha convertido casi en un eslógan asociado a su persona.
+
+```{r}
+#kwic
+
+# TABLA 4
+corpus <- corpus(casarosada %>% 
+                   filter(presidente == "Milei"),
+                 docid_field = "par_id", text_field = "discurso")
+
+kwic <-  quanteda::kwic(quanteda::tokens(corpus, 
+                                       remove_numbers = TRUE), 
+                      pattern = quanteda::phrase(c("periodistas ensobrados")),
+                      window = 20)
+
+
+
+kwic <- kwic %>% 
+  as_tibble() %>% 
+  rename(par_id = docname) %>% 
+  select(par_id, pre, keyword, post) %>% 
+  mutate(contexto = paste(pre, keyword, post), 
+         par_id = as.numeric(par_id)) %>% 
+  left_join(casarosada, by = "par_id") %>% 
+  select(fecha, contexto)
+
+
+
+# - Para ver en Viewer
+# kwic %>%
+#   gt() %>%
+#   tab_header(title = "Palabra clave en contexto (KWIC): 'periodistas ensobrados'") %>%
+#   tab_options(
+#     table.font.size = "small",
+#     heading.align = "center"
+#   )
+
+
+kwic %>%
+ kable("latex",
+       booktabs = TRUE,
+       caption =  "Palabra clave en contexto (KWIC): 'periodistas ensobrados'") %>%
+  kable_styling(latex_options = c("striped", "hold_position", "scale_down"), 
+                full_width = TRUE,            
+                position = "center",     
+                font_size = 9)
+
+
+
+
+```
+
+```{r}
+#kwic
+
+# TABLA 5
+corpus <- corpus(casarosada %>% 
+                   filter(presidente == "Milei"),
+                 docid_field = "par_id", text_field = "discurso")
+
+castakwic <-  quanteda::kwic(quanteda::tokens(corpus, 
+                                       remove_punct = TRUE,
+                                       remove_numbers = TRUE), 
+                      pattern = quanteda::phrase(c("casta politica")),
+                      window = 20)
+
+
+
+
+
+casta <- castakwic %>% 
+  as_tibble() %>% 
+  rename(par_id = docname) %>% 
+  select(par_id, pre, keyword, post) %>% 
+  mutate(words = paste(pre, keyword, post), 
+         par_id = as.numeric(par_id)) %>% 
+  select(par_id, words) %>% 
+  left_join(casarosada, by = "par_id")
+
+
+
+# -- Para Ver en Viewer
+# casta %>%
+#   arrange(tono_dis) %>% 
+#   select(fecha, words) %>% 
+#   head(5) %>% 
+#   gt() %>%
+#   tab_header(title = "Palabra clave en contexto (KWIC): 'casta politica'") %>%
+#   tab_options(
+#     table.font.size = "small",
+#     heading.align = "center"
+#   )
+
+casta %>%
+  arrange(tono_dis) %>% 
+  select(fecha, words) %>% 
+  head(5) %>%
+  kable("latex",
+        booktabs = TRUE,
+        caption = "Palabra clave en contexto (KWIC): 'casta politica'") %>%
+  kable_styling(latex_options = c("striped", "hold_position", "scale_down"), 
+                full_width = TRUE,
+                position = "center",     
+                font_size = 10)
+
+
+```
+
+Es posible confirmar algunos comentarios respecto a la forma disruptiva de Milei que, claramente, no ha perdido intensidad durante su presidencia. Además, se puede ver una doble intención. Primero de generar desconfianza ante una figura enemiga representada por el sistema político y los medios de comunicación. Y segundo, una glorificación de su persona y lo que representa como cabeza de Estado; "El primer libertario" presidente de la Argentina.
+
+\#
+
+<!-- FIN -->
+
+<!-- Esto era una funcion que use en un principio pero surgieron distintas necesidades que requerian mas control asi que lo descarte. Lo dejo aca porque me sirve de referencia y porque estuve un tiempo pensandola y me da lastima sacarla :( -->
+
+```{r frectfidf, eval=FALSE}
+
+frec_tfidf <- function(dataframe, group, fill = FALSE, slice = 10) {
+  
+  # Si se pasa un valor en `group`, lo convertimos a símbolo para evaluarlo dinámicamente
+  if (!missing(group)) {
+    group <- ensym(group)
+    
+    if (fill == TRUE) {
+      
+      data <- dataframe %>% 
+        group_by(!!group) %>% 
+        count(dis_id, word, sort = TRUE) %>% 
+        bind_tf_idf(word, dis_id, n) %>% 
+        slice_max(tf_idf, n = slice) %>% 
+        ungroup() %>% 
+        ggplot(aes(x = tf_idf, y = fct_reorder(fct(word), tf_idf), fill = !!group)) +
+        geom_col(show.legend = FALSE) +
+        facet_wrap(vars(!!group), scales = "free") +
+        labs(x = "tf-idf", y = element_blank())
+      
+    } else {
+      
+      data <- dataframe %>% 
+        group_by(!!group) %>% 
+        count(dis_id, word, sort = TRUE) %>% 
+        bind_tf_idf(word, dis_id, n) %>% 
+        slice_max(tf_idf, n = slice) %>% 
+        ungroup() %>% 
+        ggplot(aes(x = tf_idf, y = fct_reorder(fct(word), tf_idf))) +
+        geom_col(show.legend = FALSE) +
+        facet_wrap(vars(!!group), scales = "free") +
+        labs(x = "tf-idf", y = element_blank())
+      
+    }
+    
+  } else {
+    # Sin agrupamiento, no se usa `group`
+    data <- dataframe %>%     
+      count(dis_id, word, sort = TRUE) %>% 
+      bind_tf_idf(word, dis_id, n) %>% 
+      slice_max(tf_idf, n = slice) %>%
+      ggplot(aes(x = tf_idf, y = fct_reorder(fct(word), tf_idf))) +
+      geom_col(show.legend = FALSE) +
+      labs(x = "tf-idf", y = element_blank())
+  }
+  
+  return(data)
+}
+
+```
